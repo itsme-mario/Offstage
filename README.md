@@ -98,10 +98,28 @@ Requires the .NET 9 SDK (Windows).
   Windows does similar under pressure and pages them back on resume. The clean, reliable win here is
   **CPU dropping to ~0%** for frozen apps. Don't expect RAM to vanish.
 - **Suspended network apps drop connections.** A frozen Slack/Discord/browser will reconnect on thaw.
+- **You can't open a new window of a frozen single-instance app.** Edge and Chrome run one "broker"
+  (main) process that owns *every* window across all desktops; launching `msedge.exe`/`chrome.exe`
+  again just sends that broker an IPC "open a window" message and exits. If Offstage has frozen the
+  browser, the broker is suspended and can't receive the message, so no window appears — even on your
+  current desktop. The reconcile loop can't help, because it only thaws an app once one of its windows
+  lands on the current desktop, and here the window never gets created (a chicken-and-egg deadlock).
+  Workarounds today: thaw first (`Ctrl+Alt+R`), add the browser to **Never freeze…**, or run a second
+  copy under a separate `--user-data-dir` (its own independent broker). See the roadmap below for a
+  planned proper fix.
 - **Antivirus may flag the build.** `NtSuspendProcess` + `EmptyWorkingSet` + process enumeration is a
   malware-like fingerprint. For personal use, add this folder as a Defender exclusion.
 
 ## Roadmap (not built yet)
 
 - A custom tray icon and an in-UI hotkey rebinding dialog.
+- **"Leave the broker alive" freeze mode for single-instance apps (Edge/Chrome/Electron).** Instead of
+  suspending the *whole* tree, suspend only the **children** (renderer, GPU and utility processes —
+  where nearly all the background CPU actually burns) and leave the root/broker process running. The
+  broker stays responsive enough to accept a new-window request, which fixes the deadlock above, while
+  you still get the bulk of the CPU savings. Since Offstage already resolves the full process tree and
+  records exactly which PIDs it froze, this is mostly: mark known-broker apps by process name, skip the
+  root PID when suspending them, and resume the same recorded child set on thaw. Caveats to validate
+  first — Chromium's renderer-hang watchdog may flag suspended renderers as "unresponsive" and try to
+  reload/kill them, so this needs testing before it's promoted from experimental.
 - Optional close-and-restore adapters for specific apps (much more fragile — deferred on purpose).
