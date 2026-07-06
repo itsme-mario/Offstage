@@ -81,6 +81,13 @@ internal static class NativeMethods
     [DllImport("psapi.dll", SetLastError = true)]
     public static extern bool EmptyWorkingSet(IntPtr hProcess);
 
+    // ---- Process command line (ntdll) — used to recognise Chromium/Electron helper processes ----
+
+    [DllImport("ntdll.dll")]
+    public static extern uint NtQueryInformationProcess(
+        IntPtr processHandle, int processInformationClass,
+        IntPtr processInformation, int processInformationLength, ref int returnLength);
+
     // ---- Constants ----
 
     public const uint TH32CS_SNAPPROCESS = 0x00000002;
@@ -90,6 +97,10 @@ internal static class NativeMethods
     public const uint PROCESS_QUERY_INFORMATION = 0x0400;
     public const uint PROCESS_SET_QUOTA = 0x0100;
     public const uint PROCESS_ACCESS = PROCESS_SUSPEND_RESUME | PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA;
+
+    // NtQueryInformationProcess info class that returns the target's command line as a UNICODE_STRING
+    // (Windows 8.1+). Readable with PROCESS_QUERY_INFORMATION, which PROCESS_ACCESS already grants.
+    public const int ProcessCommandLineInformation = 60;
 
     // Hotkey modifiers.
     public const uint MOD_ALT = 0x0001;
@@ -107,6 +118,14 @@ internal static class NativeMethods
     public const int WS_EX_APPWINDOW = 0x00040000;
 
     public static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct UNICODE_STRING
+    {
+        public ushort Length;         // bytes, not chars
+        public ushort MaximumLength;
+        public IntPtr Buffer;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct PROCESSENTRY32

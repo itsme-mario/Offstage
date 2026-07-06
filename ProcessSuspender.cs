@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 
 namespace Offstage;
@@ -12,16 +13,32 @@ namespace Offstage;
 /// </summary>
 internal static class ProcessSuspender
 {
+    public static IReadOnlyList<uint> Suspend(uint rootPid) => Suspend(rootPid, leaveBrokerAlive: false);
+
     /// <summary>
     /// Suspends the process tree rooted at <paramref name="rootPid"/> and returns the exact set of
     /// PIDs that were targeted, so the caller can resume precisely what it froze.
+    ///
+    /// When <paramref name="leaveBrokerAlive"/> is set and the tree is a Chromium/Electron-style
+    /// single-broker app (Edge, Chrome, Slack, VS Code, …), the root "broker" process is left
+    /// RUNNING and only its children — the renderer/GPU/utility workers, where the background CPU
+    /// actually burns — are suspended. The broker stays responsive enough to service an "open a new
+    /// window" request, so a frozen browser no longer blocks opening a fresh window on the current
+    /// desktop, while you still get the bulk of the CPU savings.
     /// </summary>
-    public static IReadOnlyList<uint> Suspend(uint rootPid)
+    public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive)
     {
-        var pids = GetProcessTreePids(rootPid);
-        foreach (uint pid in pids)
+        (Dictionary<uint, List<uint>> childrenByParent, Dictionary<uint, string> exeByPid) = Snapshot();
+        List<uint> tree = WalkTree(rootPid, childrenByParent);
+
+        IEnumerable<uint> targets = tree;
+        if (leaveBrokerAlive && LooksLikeMultiProcessBroker(rootPid, tree, exeByPid))
+            targets = tree.Where(pid => pid != rootPid);
+
+        var suspended = targets.ToList();
+        foreach (uint pid in suspended)
             Apply(pid, suspend: true);
-        return pids;
+        return suspended;
     }
 
     public static void Resume(IEnumerable<uint> pids)
@@ -57,8 +74,12 @@ internal static class ProcessSuspender
     /// <summary>Returns the root PID plus every descendant, from a single live snapshot.</summary>
     public static List<uint> GetProcessTreePids(uint rootPid)
     {
-        Dictionary<uint, List<uint>> childrenByParent = BuildChildMap();
+        (Dictionary<uint, List<uint>> childrenByParent, _) = Snapshot();
+        return WalkTree(rootPid, childrenByParent);
+    }
 
+    private static List<uint> WalkTree(uint rootPid, Dictionary<uint, List<uint>> childrenByParent)
+    {
         var ordered = new List<uint>();
         var seen = new HashSet<uint>();
         var stack = new Stack<uint>();
@@ -79,13 +100,18 @@ internal static class ProcessSuspender
         return ordered;
     }
 
-    private static Dictionary<uint, List<uint>> BuildChildMap()
+    /// <summary>
+    /// One Toolhelp pass that yields both the parent→children map (for tree walking) and a
+    /// PID→executable-name map (for recognising an app's own helper processes).
+    /// </summary>
+    private static (Dictionary<uint, List<uint>> childrenByParent, Dictionary<uint, string> exeByPid) Snapshot()
     {
-        var map = new Dictionary<uint, List<uint>>();
+        var children = new Dictionary<uint, List<uint>>();
+        var exe = new Dictionary<uint, string>();
 
         IntPtr snapshot = NativeMethods.CreateToolhelp32Snapshot(NativeMethods.TH32CS_SNAPPROCESS, 0);
         if (snapshot == IntPtr.Zero || snapshot == NativeMethods.INVALID_HANDLE_VALUE)
-            return map;
+            return (children, exe);
 
         try
         {
@@ -98,12 +124,13 @@ internal static class ProcessSuspender
             {
                 do
                 {
-                    if (!map.TryGetValue(entry.th32ParentProcessID, out List<uint>? kids))
+                    if (!children.TryGetValue(entry.th32ParentProcessID, out List<uint>? kids))
                     {
                         kids = new List<uint>();
-                        map[entry.th32ParentProcessID] = kids;
+                        children[entry.th32ParentProcessID] = kids;
                     }
                     kids.Add(entry.th32ProcessID);
+                    exe[entry.th32ProcessID] = entry.szExeFile;
                 }
                 while (NativeMethods.Process32Next(snapshot, ref entry));
             }
@@ -113,6 +140,79 @@ internal static class ProcessSuspender
             NativeMethods.CloseHandle(snapshot);
         }
 
-        return map;
+        return (children, exe);
+    }
+
+    /// <summary>
+    /// True if the tree looks like a Chromium/Electron single-broker app. Rather than maintaining a
+    /// hard-coded list of browser/Electron executable names (Edge, Chrome, Brave, Slack, Discord,
+    /// Teams, VS Code, Spotify, …), we detect the family by its structural signature: a helper
+    /// process that shares the root's image name and carries a <c>--type=</c> switch on its command
+    /// line (renderer, gpu-process, utility, …). That covers every Chromium-based app automatically
+    /// and won't false-positive on ordinary apps that merely spawn same-named workers.
+    /// </summary>
+    private static bool LooksLikeMultiProcessBroker(uint rootPid, List<uint> tree, Dictionary<uint, string> exeByPid)
+    {
+        if (!exeByPid.TryGetValue(rootPid, out string? rootExe))
+            return false;
+
+        foreach (uint pid in tree)
+        {
+            if (pid == rootPid)
+                continue;
+            if (!exeByPid.TryGetValue(pid, out string? exe) ||
+                !string.Equals(exe, rootExe, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            string? cmd = TryGetCommandLine(pid);
+            if (cmd is not null && cmd.Contains("--type=", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Best-effort read of a process's command line; null if it can't be obtained.</summary>
+    private static string? TryGetCommandLine(uint pid)
+    {
+        IntPtr handle = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero)
+            return null;
+
+        try
+        {
+            // First call sizes the buffer (returns STATUS_INFO_LENGTH_MISMATCH and sets `needed`).
+            int needed = 0;
+            NativeMethods.NtQueryInformationProcess(
+                handle, NativeMethods.ProcessCommandLineInformation, IntPtr.Zero, 0, ref needed);
+            if (needed <= 0)
+                return null;
+
+            IntPtr buffer = Marshal.AllocHGlobal(needed);
+            try
+            {
+                uint status = NativeMethods.NtQueryInformationProcess(
+                    handle, NativeMethods.ProcessCommandLineInformation, buffer, needed, ref needed);
+                if (status != 0)
+                    return null;
+
+                var us = Marshal.PtrToStructure<NativeMethods.UNICODE_STRING>(buffer);
+                if (us.Buffer == IntPtr.Zero || us.Length == 0)
+                    return null;
+                return Marshal.PtrToStringUni(us.Buffer, us.Length / 2);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        catch
+        {
+            return null; // Any marshalling/native hiccup just means "can't tell" — treat as non-broker.
+        }
+        finally
+        {
+            NativeMethods.CloseHandle(handle);
+        }
     }
 }

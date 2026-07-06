@@ -42,6 +42,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _autoMenuItem;
     private readonly ToolStripMenuItem _neverFreezeMenu;
     private readonly ToolStripMenuItem _graceMenu;
+    private readonly ToolStripMenuItem _brokerModeItem;
     private readonly ToolStripMenuItem _runAtLoginItem;
     private readonly System.Windows.Forms.Timer _watchTimer;
     private readonly OptOutStore _optOut = new();
@@ -61,12 +62,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Dictionary<uint, string?> _processNameCache = new();
 
     private bool _autoEnabled = true;
+    private bool _leaveBrokerAlive;
     private bool _shuttingDown;
     private TimeSpan _graceDelay = TimeSpan.FromSeconds(5);
 
     public TrayApplicationContext()
     {
         _autoEnabled = _settings.Current.AutoEnabled;
+        _leaveBrokerAlive = _settings.Current.LeaveBrokerAlive;
         _graceDelay = TimeSpan.FromSeconds(Math.Clamp(_settings.Current.GraceSeconds, 1, 3600));
 
         _hotkeyWindow = new HotkeyWindow();
@@ -83,6 +86,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _graceMenu = new ToolStripMenuItem("Freeze delay");
         _graceMenu.DropDownOpening += (_, _) => RebuildGraceMenu();
+
+        _brokerModeItem = new ToolStripMenuItem(
+            "Keep browser broker alive (experimental)", null, (_, _) => ToggleBrokerMode())
+        {
+            Checked = _leaveBrokerAlive,
+            CheckOnClick = false
+        };
 
         _runAtLoginItem = new ToolStripMenuItem("Run at login", null, (_, _) => ToggleRunAtLogin())
         {
@@ -127,6 +137,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_autoMenuItem);
         menu.Items.Add(_graceMenu);
         menu.Items.Add(_neverFreezeMenu);
+        menu.Items.Add(_brokerModeItem);
         menu.Items.Add(_runAtLoginItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Freeze background desktops", null, (_, _) => ManualFreeze());
@@ -303,6 +314,25 @@ internal sealed class TrayApplicationContext : ApplicationContext
             $"Background apps freeze after {(seconds < 60 ? $"{seconds} seconds" : "1 minute")} off-screen.");
     }
 
+    private void ToggleBrokerMode()
+    {
+        _leaveBrokerAlive = !_leaveBrokerAlive;
+        _brokerModeItem.Checked = _leaveBrokerAlive;
+        _settings.Current.LeaveBrokerAlive = _leaveBrokerAlive;
+        _settings.Save();
+
+        // The mode changes *how* an app is frozen, so re-baseline: thaw everything now and let the
+        // next freeze (auto reconcile or a manual hotkey) apply the new policy cleanly. Otherwise a
+        // browser already frozen whole-tree would stay unusable until the user thawed it by hand.
+        ThawAll(announce: false);
+
+        ShowBalloon(
+            _leaveBrokerAlive ? "Keep-broker-alive on" : "Keep-broker-alive off",
+            _leaveBrokerAlive
+                ? "Chromium/Electron apps (Edge, Chrome, Slack…) will keep their main process running — only background workers are suspended. Everything was thawed to re-baseline."
+                : "Chromium/Electron apps will be fully suspended again. Everything was thawed to re-baseline.");
+    }
+
     private void ToggleRunAtLogin()
     {
         bool desired = !_runAtLoginItem.Checked;
@@ -381,7 +411,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
             else if (now - since >= _graceDelay)
             {
-                try { _frozen[pid] = ProcessSuspender.Suspend(pid); changed = true; }
+                try { _frozen[pid] = ProcessSuspender.Suspend(pid, _leaveBrokerAlive); changed = true; }
                 catch { /* ignore stubborn process */ }
                 _offDesktopSince.Remove(pid);
             }
@@ -426,7 +456,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             try
             {
-                _frozen[pid] = ProcessSuspender.Suspend(pid);
+                _frozen[pid] = ProcessSuspender.Suspend(pid, _leaveBrokerAlive);
                 _offDesktopSince.Remove(pid);
                 frozenCount++;
             }

@@ -11,6 +11,13 @@ internal sealed class AppSettings
     public bool AutoEnabled { get; set; } = true;
     public string FreezeHotkey { get; set; } = "Ctrl+Alt+S";
     public string ThawHotkey { get; set; } = "Ctrl+Alt+R";
+
+    /// <summary>
+    /// Experimental: for Chromium/Electron apps (Edge, Chrome, Slack, VS Code, …) suspend only the
+    /// renderer/GPU/utility children and leave the main "broker" process running, so you can still
+    /// open a new window of a frozen browser on the current desktop. Off by default.
+    /// </summary>
+    public bool LeaveBrokerAlive { get; set; } = false;
 }
 
 /// <summary>Loads and persists <see cref="AppSettings"/> at %APPDATA%\Offstage\settings.json.</summary>
