@@ -57,10 +57,31 @@ top of a built-in list of system/shell processes that are never frozen regardles
 **Settings (tray menu):**
 
 - **Freeze delay** — how long an app must sit off-screen before it's frozen (2 s – 1 min presets).
+- **Keep browser broker alive (experimental)** — see below. Off by default.
 - **Run at login** — adds/removes a per-user startup entry so Offstage launches when you sign in.
-- Auto-freeze on/off, the freeze delay, and the hotkeys all persist to `%APPDATA%\Offstage\settings.json`.
-  Hotkeys aren't rebindable in the UI yet — edit `FreezeHotkey` / `ThawHotkey` in that file (e.g.
-  `"Ctrl+Shift+F9"`) and restart. At least one modifier plus a key (A–Z, 0–9, or F1–F24) is required.
+- Auto-freeze on/off, the freeze delay, keep-broker-alive, and the hotkeys all persist to
+  `%APPDATA%\Offstage\settings.json`. Hotkeys aren't rebindable in the UI yet — edit `FreezeHotkey` /
+  `ThawHotkey` in that file (e.g. `"Ctrl+Shift+F9"`) and restart. At least one modifier plus a key
+  (A–Z, 0–9, or F1–F24) is required.
+
+**Keep browser broker alive (experimental):** Chromium/Electron apps (Edge, Chrome, Brave, Slack,
+Discord, VS Code, …) run one main "broker" process that owns every window across all desktops, plus a
+pile of renderer/GPU/utility children where nearly all the background CPU actually burns. With this
+setting **on**, Offstage suspends only those children and leaves the broker running, so:
+
+- You can still **open a new window** of a frozen browser on your current desktop — the broker is alive
+  to service the request, and the new window's renderer is never frozen.
+- The **background tabs stay frozen** even while that new window is open. Offstage remembers which
+  windows the app owned at freeze time; it only thaws the frozen workers when *those* windows come back
+  to the current desktop (i.e. you actually switch to their desktop), not when you open a fresh window.
+
+Detection is automatic and needs **no per-app list**: an app is treated as a broker when one of its
+child processes shares its executable name and carries a Chromium `--type=` switch (renderer,
+gpu-process, utility, …). Non-Chromium apps are unaffected and still freeze whole-tree.
+
+Caveat to watch: Chromium has a renderer-hang watchdog, so with renderers suspended but the broker
+alive it *may* occasionally show "Page unresponsive" or reload a background tab. If an app misbehaves,
+add it to **Never freeze…** and leave this mode for the rest.
 
 ## Build & run
 
@@ -98,28 +119,18 @@ Requires the .NET 9 SDK (Windows).
   Windows does similar under pressure and pages them back on resume. The clean, reliable win here is
   **CPU dropping to ~0%** for frozen apps. Don't expect RAM to vanish.
 - **Suspended network apps drop connections.** A frozen Slack/Discord/browser will reconnect on thaw.
-- **You can't open a new window of a frozen single-instance app.** Edge and Chrome run one "broker"
-  (main) process that owns *every* window across all desktops; launching `msedge.exe`/`chrome.exe`
-  again just sends that broker an IPC "open a window" message and exits. If Offstage has frozen the
-  browser, the broker is suspended and can't receive the message, so no window appears — even on your
-  current desktop. The reconcile loop can't help, because it only thaws an app once one of its windows
-  lands on the current desktop, and here the window never gets created (a chicken-and-egg deadlock).
-  Workarounds today: thaw first (`Ctrl+Alt+R`), add the browser to **Never freeze…**, or run a second
-  copy under a separate `--user-data-dir` (its own independent broker). See the roadmap below for a
-  planned proper fix.
+- **Opening a new window of a frozen single-instance app** (default mode). Edge and Chrome run one
+  "broker" (main) process that owns *every* window across all desktops; launching `msedge.exe`/
+  `chrome.exe` again just sends that broker an IPC "open a window" message and exits. In the default
+  whole-tree freeze the broker is suspended and can't receive the message, so no window appears — even
+  on your current desktop. Turn on **Keep browser broker alive** (below) to fix this; it's the
+  purpose-built mode for exactly this case.
 - **Antivirus may flag the build.** `NtSuspendProcess` + `EmptyWorkingSet` + process enumeration is a
   malware-like fingerprint. For personal use, add this folder as a Defender exclusion.
 
 ## Roadmap (not built yet)
 
 - A custom tray icon and an in-UI hotkey rebinding dialog.
-- **"Leave the broker alive" freeze mode for single-instance apps (Edge/Chrome/Electron).** Instead of
-  suspending the *whole* tree, suspend only the **children** (renderer, GPU and utility processes —
-  where nearly all the background CPU actually burns) and leave the root/broker process running. The
-  broker stays responsive enough to accept a new-window request, which fixes the deadlock above, while
-  you still get the bulk of the CPU savings. Since Offstage already resolves the full process tree and
-  records exactly which PIDs it froze, this is mostly: mark known-broker apps by process name, skip the
-  root PID when suspending them, and resume the same recorded child set on thaw. Caveats to validate
-  first — Chromium's renderer-hang watchdog may flag suspended renderers as "unresponsive" and try to
-  reload/kill them, so this needs testing before it's promoted from experimental.
+- **Promote "Keep browser broker alive" from experimental to default** once it's had more real-world
+  mileage — see the caveats in its section above.
 - Optional close-and-restore adapters for specific apps (much more fragile — deferred on purpose).

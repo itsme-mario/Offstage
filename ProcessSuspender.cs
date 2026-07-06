@@ -27,13 +27,19 @@ internal static class ProcessSuspender
     /// desktop, while you still get the bulk of the CPU savings.
     /// </summary>
     public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive)
+        => Suspend(rootPid, leaveBrokerAlive, out _);
+
+    /// <param name="brokerModeApplied">
+    /// True if the app was recognised as a broker and only its children were suspended (root left
+    /// running). The caller uses this to track the app's windows for smarter thawing.
+    /// </param>
+    public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive, out bool brokerModeApplied)
     {
         (Dictionary<uint, List<uint>> childrenByParent, Dictionary<uint, string> exeByPid) = Snapshot();
         List<uint> tree = WalkTree(rootPid, childrenByParent);
 
-        IEnumerable<uint> targets = tree;
-        if (leaveBrokerAlive && LooksLikeMultiProcessBroker(rootPid, tree, exeByPid))
-            targets = tree.Where(pid => pid != rootPid);
+        brokerModeApplied = leaveBrokerAlive && LooksLikeMultiProcessBroker(rootPid, tree, exeByPid);
+        IEnumerable<uint> targets = brokerModeApplied ? tree.Where(pid => pid != rootPid) : tree;
 
         var suspended = targets.ToList();
         foreach (uint pid in suspended)

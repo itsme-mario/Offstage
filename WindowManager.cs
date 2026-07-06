@@ -48,6 +48,9 @@ internal static class WindowManager
         }
     }
 
+    /// <summary>True if the handle still refers to an existing window (may be on any desktop).</summary>
+    public static bool IsWindow(IntPtr hWnd) => NativeMethods.IsWindow(hWnd);
+
     private static bool IsAltTabWindow(IntPtr hWnd)
     {
         if (!NativeMethods.IsWindowVisible(hWnd))
