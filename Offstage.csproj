@@ -9,6 +9,11 @@
     <AssemblyName>Offstage</AssemblyName>
     <RootNamespace>Offstage</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>Offstage.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Offstage.ico" />
+  </ItemGroup>
 
 </Project>

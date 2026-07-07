@@ -38,6 +38,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     };
 
     private readonly NotifyIcon _tray;
+    private readonly Icon _appIcon;
     private readonly HotkeyWindow _hotkeyWindow;
     private readonly ToolStripMenuItem _autoMenuItem;
     private readonly ToolStripMenuItem _neverFreezeMenu;
@@ -105,9 +106,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             CheckOnClick = false
         };
 
+        _appIcon = LoadAppIcon();
         _tray = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = _appIcon,
             Text = "Offstage",
             Visible = true,
             ContextMenuStrip = BuildMenu()
@@ -700,6 +702,25 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _tray.ShowBalloonTip(4000);
     }
 
+    // The app icon is embedded as a resource (see Offstage.csproj) so the tray icon matches the
+    // executable icon without shipping a loose .ico next to the exe. Falls back to the system icon
+    // if the resource can't be found, so a packaging mistake can never crash startup.
+    private static Icon LoadAppIcon()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            using var stream = asm.GetManifestResourceStream("Offstage.Offstage.ico");
+            if (stream != null)
+                return new Icon(stream);
+        }
+        catch
+        {
+            // Ignore and fall back below.
+        }
+        return SystemIcons.Application;
+    }
+
     private void ExitApp()
     {
         _watchTimer.Stop();
@@ -713,6 +734,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _tray.Visible = false;
         _tray.Dispose();
+        _appIcon.Dispose();
         _hotkeyWindow.DestroyHandle();
         ExitThread();
     }
