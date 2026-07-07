@@ -65,23 +65,30 @@ top of a built-in list of system/shell processes that are never frozen regardles
   (A–Z, 0–9, or F1–F24) is required.
 
 **Keep browser broker alive (experimental):** Chromium/Electron apps (Edge, Chrome, Brave, Slack,
-Discord, VS Code, …) run one main "broker" process that owns every window across all desktops, plus a
-pile of renderer/GPU/utility children where nearly all the background CPU actually burns. With this
-setting **on**, Offstage suspends only those children and leaves the broker running, so:
+Discord, VS Code, …) run one main "broker" process that owns every window across all desktops, a pile
+of per-tab **renderer** children where nearly all the background CPU burns, and a few **shared service**
+processes (the GPU process, and utility services for network/storage/audio). With this setting **on**,
+Offstage suspends only the **renderers** and leaves the broker, the GPU process and the utility services
+running, so:
 
-- You can still **open a new window** of a frozen browser on your current desktop — the broker is alive
-  to service the request, and the new window's renderer is never frozen.
+- You can still **open a new window** of a frozen browser on your current desktop, and it renders
+  normally — the broker is alive to service the request, its fresh renderer is never frozen, and the
+  shared GPU/network processes it needs to paint and load are left running. (Freezing those shared
+  processes is what made a new window come up blank in an earlier revision.)
 - The **background tabs stay frozen** even while that new window is open. Offstage remembers which
-  windows the app owned at freeze time; it only thaws the frozen workers when *those* windows come back
-  to the current desktop (i.e. you actually switch to their desktop), not when you open a fresh window.
+  windows the app owned at freeze time; it only thaws the frozen renderers when *those* windows come
+  back to the current desktop (i.e. you actually switch to their desktop), not when you open a fresh
+  window.
 
-Detection is automatic and needs **no per-app list**: an app is treated as a broker when one of its
-child processes shares its executable name and carries a Chromium `--type=` switch (renderer,
-gpu-process, utility, …). Non-Chromium apps are unaffected and still freeze whole-tree.
+Detection is automatic and needs **no per-app list**: a child process that shares the app's executable
+name and carries a Chromium `--type=` switch is the signature; Offstage then suspends just the ones
+whose type is `renderer`. Non-Chromium apps are unaffected and still freeze whole-tree.
 
-Caveat to watch: Chromium has a renderer-hang watchdog, so with renderers suspended but the broker
-alive it *may* occasionally show "Page unresponsive" or reload a background tab. If an app misbehaves,
-add it to **Never freeze…** and leave this mode for the rest.
+Caveats to watch: (1) Chromium has a renderer-hang watchdog, so with renderers suspended but the broker
+alive it *may* occasionally show "Page unresponsive" or reload a background tab. (2) If the new window
+happens to reuse a suspended background renderer (Chromium's spare/same-site reuse), it can still come
+up blank until you switch away and back. If an app misbehaves, add it to **Never freeze…** and leave
+this mode for the rest.
 
 ## Build & run
 

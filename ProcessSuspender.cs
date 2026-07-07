@@ -20,26 +20,34 @@ internal static class ProcessSuspender
     /// PIDs that were targeted, so the caller can resume precisely what it froze.
     ///
     /// When <paramref name="leaveBrokerAlive"/> is set and the tree is a Chromium/Electron-style
-    /// single-broker app (Edge, Chrome, Slack, VS Code, …), the root "broker" process is left
-    /// RUNNING and only its children — the renderer/GPU/utility workers, where the background CPU
-    /// actually burns — are suspended. The broker stays responsive enough to service an "open a new
-    /// window" request, so a frozen browser no longer blocks opening a fresh window on the current
-    /// desktop, while you still get the bulk of the CPU savings.
+    /// single-broker app (Edge, Chrome, Slack, VS Code, …), only the per-tab <c>--type=renderer</c>
+    /// children — where the background CPU actually burns — are suspended. The broker, the GPU
+    /// process and the shared utility services (network, storage, audio, …) are left RUNNING, because
+    /// they're shared with any NEW window the live broker opens on the current desktop: suspend the
+    /// GPU process and that window paints nothing (blank); suspend the network service and it can't
+    /// load. So the broker can still serve a fresh window while the background tabs stay CPU-frozen.
     /// </summary>
     public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive)
         => Suspend(rootPid, leaveBrokerAlive, out _);
 
     /// <param name="brokerModeApplied">
-    /// True if the app was recognised as a broker and only its children were suspended (root left
-    /// running). The caller uses this to track the app's windows for smarter thawing.
+    /// True if the app was recognised as a broker and only its renderers were suspended (broker, GPU
+    /// and utilities left running). The caller uses this to track the app's windows for smarter thawing.
     /// </param>
     public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive, out bool brokerModeApplied)
     {
         (Dictionary<uint, List<uint>> childrenByParent, Dictionary<uint, string> exeByPid) = Snapshot();
         List<uint> tree = WalkTree(rootPid, childrenByParent);
 
-        brokerModeApplied = leaveBrokerAlive && LooksLikeMultiProcessBroker(rootPid, tree, exeByPid);
-        IEnumerable<uint> targets = brokerModeApplied ? tree.Where(pid => pid != rootPid) : tree;
+        brokerModeApplied = false;
+        IEnumerable<uint> targets = tree;
+
+        if (leaveBrokerAlive &&
+            TrySelectBrokerRenderers(rootPid, tree, exeByPid, out List<uint> renderers))
+        {
+            brokerModeApplied = true;
+            targets = renderers;
+        }
 
         var suspended = targets.ToList();
         foreach (uint pid in suspended)
@@ -150,18 +158,22 @@ internal static class ProcessSuspender
     }
 
     /// <summary>
-    /// True if the tree looks like a Chromium/Electron single-broker app. Rather than maintaining a
-    /// hard-coded list of browser/Electron executable names (Edge, Chrome, Brave, Slack, Discord,
-    /// Teams, VS Code, Spotify, …), we detect the family by its structural signature: a helper
-    /// process that shares the root's image name and carries a <c>--type=</c> switch on its command
-    /// line (renderer, gpu-process, utility, …). That covers every Chromium-based app automatically
-    /// and won't false-positive on ordinary apps that merely spawn same-named workers.
+    /// If the tree is a Chromium/Electron broker app, outputs its renderer child PIDs and returns
+    /// true. Detection is structural — no hard-coded app-name list (Edge, Chrome, Brave, Slack,
+    /// Discord, Teams, VS Code, Spotify, …): a helper process that shares the root's image name and
+    /// carries a Chromium <c>--type=</c> switch is the signature. Each such helper is classified by
+    /// that switch and only the renderers (<c>--type=renderer</c>) are collected; the GPU, utility
+    /// and other shared workers are intentionally excluded so the live broker can still paint and
+    /// load a new foreground window. Won't false-positive on apps that merely spawn same-named workers.
     /// </summary>
-    private static bool LooksLikeMultiProcessBroker(uint rootPid, List<uint> tree, Dictionary<uint, string> exeByPid)
+    private static bool TrySelectBrokerRenderers(
+        uint rootPid, List<uint> tree, Dictionary<uint, string> exeByPid, out List<uint> renderers)
     {
+        renderers = new List<uint>();
         if (!exeByPid.TryGetValue(rootPid, out string? rootExe))
             return false;
 
+        bool isBroker = false;
         foreach (uint pid in tree)
         {
             if (pid == rootPid)
@@ -170,12 +182,37 @@ internal static class ProcessSuspender
                 !string.Equals(exe, rootExe, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            string? cmd = TryGetCommandLine(pid);
-            if (cmd is not null && cmd.Contains("--type=", StringComparison.OrdinalIgnoreCase))
-                return true;
+            string? type = ChromiumProcessType(pid);
+            if (type is null)
+                continue;
+
+            isBroker = true; // any --type= helper confirms the Chromium/Electron family
+            if (type == "renderer")
+                renderers.Add(pid);
         }
 
-        return false;
+        return isBroker;
+    }
+
+    /// <summary>
+    /// The value of a process's Chromium <c>--type=</c> switch (e.g. "renderer", "gpu-process",
+    /// "utility"), lower-cased; null if it has no such switch or the command line can't be read.
+    /// </summary>
+    private static string? ChromiumProcessType(uint pid)
+    {
+        string? cmd = TryGetCommandLine(pid);
+        if (cmd is null)
+            return null;
+
+        const string flag = "--type=";
+        int start = cmd.IndexOf(flag, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+            return null;
+
+        start += flag.Length;
+        int end = cmd.IndexOf(' ', start);
+        string value = end < 0 ? cmd[start..] : cmd[start..end];
+        return value.Trim().Trim('"').ToLowerInvariant();
     }
 
     /// <summary>Best-effort read of a process's command line; null if it can't be obtained.</summary>
