@@ -28,24 +28,14 @@ internal static class ProcessSuspender
     /// load. So the broker can still serve a fresh window while the background tabs stay CPU-frozen.
     /// </summary>
     public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive)
-        => Suspend(rootPid, leaveBrokerAlive, out _);
-
-    /// <param name="brokerModeApplied">
-    /// True if the app was recognised as a broker and only its renderers were suspended (broker, GPU
-    /// and utilities left running). The caller uses this to track the app's windows for smarter thawing.
-    /// </param>
-    public static IReadOnlyList<uint> Suspend(uint rootPid, bool leaveBrokerAlive, out bool brokerModeApplied)
     {
         (Dictionary<uint, List<uint>> childrenByParent, Dictionary<uint, string> exeByPid) = Snapshot();
         List<uint> tree = WalkTree(rootPid, childrenByParent);
 
-        brokerModeApplied = false;
         IEnumerable<uint> targets = tree;
-
         if (leaveBrokerAlive &&
             TrySelectBrokerRenderers(rootPid, tree, exeByPid, out List<uint> renderers))
         {
-            brokerModeApplied = true;
             targets = renderers;
         }
 

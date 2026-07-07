@@ -56,11 +56,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     // Root PID -> exact list of PIDs suspended for it, so thaw resumes precisely what freeze froze.
     private readonly Dictionary<uint, IReadOnlyList<uint>> _frozen = new();
 
-    // For broker apps frozen children-only (keep-broker-alive mode): root PID -> the window handles
-    // the app owned at freeze time. Lets thaw distinguish "user switched to the frozen app's desktop"
-    // (thaw) from "user opened a NEW window of the same app on this desktop" (keep background frozen).
-    private readonly Dictionary<uint, HashSet<IntPtr>> _frozenBrokerWindows = new();
-
     // PID -> first time it was observed fully off the current desktop (drives the grace delay).
     private readonly Dictionary<uint, DateTime> _offDesktopSince = new();
 
@@ -260,7 +255,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             {
                 try { ProcessSuspender.Resume(_frozen[pid]); } catch { /* keep going */ }
                 _frozen.Remove(pid);
-                _frozenBrokerWindows.Remove(pid);
                 _offDesktopSince.Remove(pid);
                 changed = true;
             }
@@ -392,14 +386,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         bool changed = false;
 
-        // 1) Thaw: any frozen process now showing on the current desktop.
+        // 1) Thaw: any frozen process now showing on the current desktop. For a broker app this fires
+        //    as soon as ANY of its windows is here — including a brand-new window opened on this
+        //    desktop — because Chromium reuses/shares renderer processes across windows, so a frozen
+        //    background renderer can end up backing that new window (blank content). Thawing the app
+        //    whenever it has a window in front of you keeps it reliable.
         foreach (uint pid in _frozen.Keys.ToList())
         {
-            if (ShouldThawFrozen(pid, onCurrentByPid))
+            if (onCurrentByPid.TryGetValue(pid, out bool onCurrent) && onCurrent)
             {
                 try { ProcessSuspender.Resume(_frozen[pid]); } catch { /* keep going */ }
                 _frozen.Remove(pid);
-                _frozenBrokerWindows.Remove(pid);
                 _offDesktopSince.Remove(pid);
                 changed = true;
             }
@@ -420,7 +417,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
             else if (now - since >= _graceDelay)
             {
-                if (TryFreeze(pid, windows)) changed = true;
+                try { _frozen[pid] = ProcessSuspender.Suspend(pid, _leaveBrokerAlive); changed = true; }
+                catch { /* ignore stubborn process */ }
                 _offDesktopSince.Remove(pid);
             }
         }
@@ -438,52 +436,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     // ---- Freeze / thaw core ----
-
-    /// <summary>
-    /// Freeze one app, recording the exact PIDs suspended and — for a broker app frozen
-    /// children-only — the window handles it owned at freeze time. Returns false and changes nothing
-    /// if the process resists suspension, so a single stubborn app never breaks the batch.
-    /// </summary>
-    private bool TryFreeze(uint pid, List<ManagedWindow> windows)
-    {
-        try
-        {
-            _frozen[pid] = ProcessSuspender.Suspend(pid, _leaveBrokerAlive, out bool brokerModeApplied);
-            if (brokerModeApplied)
-                _frozenBrokerWindows[pid] = windows.Select(w => w.Handle).ToHashSet();
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Whether a frozen app should thaw this tick. Ordinary app: any window on the current desktop.
-    /// Broker app frozen children-only: only when one of the windows it owned AT FREEZE TIME is back
-    /// on the current desktop (the user switched to that desktop). A brand-new window the broker
-    /// opened on the current desktop isn't in that set, so opening a new window here leaves the
-    /// background renderers frozen. If every remembered window is gone, thaw to release the orphans.
-    /// </summary>
-    private bool ShouldThawFrozen(uint pid, Dictionary<uint, bool> onCurrentByPid)
-    {
-        if (_frozenBrokerWindows.TryGetValue(pid, out HashSet<IntPtr>? frozenWindows))
-        {
-            bool anyLive = false;
-            foreach (IntPtr handle in frozenWindows)
-            {
-                if (!WindowManager.IsWindow(handle))
-                    continue;
-                anyLive = true;
-                if (WindowManager.IsOnCurrentDesktop(handle))
-                    return true;
-            }
-            return !anyLive;
-        }
-
-        return onCurrentByPid.TryGetValue(pid, out bool onCurrent) && onCurrent;
-    }
 
     private void ManualFreeze()
     {
@@ -508,10 +460,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (ShouldSkipFreeze(pid, windows))
                 continue;
 
-            if (TryFreeze(pid, windows))
+            try
             {
+                _frozen[pid] = ProcessSuspender.Suspend(pid, _leaveBrokerAlive);
                 _offDesktopSince.Remove(pid);
                 frozenCount++;
+            }
+            catch
+            {
+                // A single stubborn process must not break the batch.
             }
         }
 
@@ -529,7 +486,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _frozen.Clear();
-        _frozenBrokerWindows.Clear();
         _offDesktopSince.Clear();
         UpdateTrayText();
         SaveSessionState();

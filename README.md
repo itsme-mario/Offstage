@@ -69,26 +69,29 @@ Discord, VS Code, …) run one main "broker" process that owns every window acro
 of per-tab **renderer** children where nearly all the background CPU burns, and a few **shared service**
 processes (the GPU process, and utility services for network/storage/audio). With this setting **on**,
 Offstage suspends only the **renderers** and leaves the broker, the GPU process and the utility services
-running, so:
+running. This fixes the default mode's deadlock — you can **open a new window** of a browser that's
+parked (and frozen) on another desktop, and it renders normally, because the broker is alive to service
+the request and the GPU/network processes it needs to paint and load are left running.
 
-- You can still **open a new window** of a frozen browser on your current desktop, and it renders
-  normally — the broker is alive to service the request, its fresh renderer is never frozen, and the
-  shared GPU/network processes it needs to paint and load are left running. (Freezing those shared
-  processes is what made a new window come up blank in an earlier revision.)
-- The **background tabs stay frozen** even while that new window is open. Offstage remembers which
-  windows the app owned at freeze time; it only thaws the frozen renderers when *those* windows come
-  back to the current desktop (i.e. you actually switch to their desktop), not when you open a fresh
-  window.
+The scope of the CPU win is deliberately simple and reliable: **a browser's renderers are frozen only
+while it has _no_ window on your current desktop.** The moment any of its windows is here — whether you
+switched to its desktop or opened a fresh window on this one — Offstage thaws its renderers. So you
+won't get a browser frozen on desktop 2 *and* an interactive window of it on desktop 1 at the same
+time; the win is for browsers you've fully parked elsewhere.
+
+Why not keep desktop 2's tabs frozen while you use a window here? Because Chromium **reuses and shares
+renderer processes across windows** (a pre-warmed "spare" renderer, plus same-site reuse) and exposes
+no window→renderer mapping. A new window can therefore be handed a renderer we froze for the
+background, and its content comes up blank. Thawing the whole app whenever it has a window in front of
+you sidesteps that entirely.
 
 Detection is automatic and needs **no per-app list**: a child process that shares the app's executable
 name and carries a Chromium `--type=` switch is the signature; Offstage then suspends just the ones
 whose type is `renderer`. Non-Chromium apps are unaffected and still freeze whole-tree.
 
-Caveats to watch: (1) Chromium has a renderer-hang watchdog, so with renderers suspended but the broker
-alive it *may* occasionally show "Page unresponsive" or reload a background tab. (2) If the new window
-happens to reuse a suspended background renderer (Chromium's spare/same-site reuse), it can still come
-up blank until you switch away and back. If an app misbehaves, add it to **Never freeze…** and leave
-this mode for the rest.
+Caveat to watch: Chromium has a renderer-hang watchdog, so with renderers suspended but the broker
+alive it *may* occasionally show "Page unresponsive" or reload a background tab. If an app misbehaves,
+add it to **Never freeze…** and leave this mode for the rest.
 
 ## Build & run
 
